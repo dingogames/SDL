@@ -67,6 +67,8 @@ typedef struct
     SDL_bool beginScene;
     SDL_bool enableSeparateAlphaBlend;
     D3DTEXTUREFILTERTYPE scaleMode[8];
+    D3DTEXTUREADDRESS wrapMode[8];
+    SDL_bool mipmapMode[8];
     IDirect3DSurface9 *defaultRenderTarget;
     IDirect3DSurface9 *currentRenderTarget;
     void *d3dxDLL;
@@ -78,6 +80,7 @@ typedef struct
     int currentVertexBuffer;
     SDL_bool reportedVboProblem;
     D3D_DrawStateCache drawstate;
+    SDL_bool mipmapCapAvailable;
 } D3D_RenderData;
 
 typedef struct
@@ -89,12 +92,14 @@ typedef struct
     D3DFORMAT d3dfmt;
     IDirect3DTexture9 *texture;
     IDirect3DTexture9 *staging;
+    SDL_bool mipmap;
 } D3D_TextureRep;
 
 typedef struct
 {
     D3D_TextureRep texture;
     D3DTEXTUREFILTERTYPE scaleMode;
+    D3DTEXTUREADDRESS wrapMode;
 
 #if SDL_HAVE_YUV
     /* YV12 texture support */
@@ -278,6 +283,8 @@ static void D3D_InitRenderState(D3D_RenderData *data)
 
     /* Reset our current scale mode */
     SDL_memset(data->scaleMode, 0xFF, sizeof(data->scaleMode));
+    SDL_memset(data->wrapMode, 0xFF, sizeof(data->wrapMode));
+    SDL_memset(data->mipmapMode, 0x00, sizeof(data->mipmapMode));
 
     /* Start the render with beginScene */
     data->beginScene = SDL_TRUE;
@@ -419,9 +426,11 @@ static SDL_bool D3D_SupportsBlendMode(SDL_Renderer *renderer, SDL_BlendMode blen
     return SDL_TRUE;
 }
 
-static int D3D_CreateTextureRep(IDirect3DDevice9 *device, D3D_TextureRep *texture, DWORD usage, Uint32 format, D3DFORMAT d3dfmt, int w, int h)
+static int
+D3D_CreateTextureRep(IDirect3DDevice9 *device, D3D_TextureRep *texture, DWORD usage, Uint32 format, D3DFORMAT d3dfmt, int w, int h, SDL_bool mipmap)
 {
     HRESULT result;
+    int levels;
 
     texture->dirty = SDL_FALSE;
     texture->w = w;
@@ -429,13 +438,16 @@ static int D3D_CreateTextureRep(IDirect3DDevice9 *device, D3D_TextureRep *textur
     texture->usage = usage;
     texture->format = format;
     texture->d3dfmt = d3dfmt;
+    texture->mipmap = mipmap;
 
-    result = IDirect3DDevice9_CreateTexture(device, w, h, 1, usage,
-                                            PixelFormatToD3DFMT(format),
-                                            D3DPOOL_DEFAULT, &texture->texture, NULL);
+    levels = mipmap ? 0 : 1;
+    result = IDirect3DDevice9_CreateTexture(device, w, h, levels, usage,
+        PixelFormatToD3DFMT(format),
+        D3DPOOL_DEFAULT, &texture->texture, NULL);
     if (FAILED(result)) {
         return D3D_SetError("CreateTexture(D3DPOOL_DEFAULT)", result);
     }
+
     return 0;
 }
 
@@ -533,22 +545,35 @@ static int D3D_CreateTexture(SDL_Renderer *renderer, SDL_Texture *texture)
     D3D_RenderData *data = (D3D_RenderData *)renderer->driverdata;
     D3D_TextureData *texturedata;
     DWORD usage;
+    SDL_bool mipmap = SDL_FALSE;
 
     texturedata = (D3D_TextureData *)SDL_calloc(1, sizeof(*texturedata));
     if (!texturedata) {
         return SDL_OutOfMemory();
     }
     texturedata->scaleMode = (texture->scaleMode == SDL_ScaleModeNearest) ? D3DTEXF_POINT : D3DTEXF_LINEAR;
+    texturedata->wrapMode = (texture->wrapMode == SDL_WRAPMODE_CLAMP) ? D3DTADDRESS_CLAMP : D3DTADDRESS_WRAP;
+
+    if (data->mipmapCapAvailable && // device supports mip maps
+        SDL_GetHintBoolean(SDL_HINT_RENDER_FILTER_MIPMAP, SDL_FALSE) && // user has requested mipmaps for this texture
+        IDirect3D9_CheckDeviceFormat(data->d3d, data->adapter, D3DDEVTYPE_HAL, data->pparams.BackBufferFormat, 
+            D3DUSAGE_AUTOGENMIPMAP, D3DRTYPE_TEXTURE, PixelFormatToD3DFMT(texture->format)) == D3D_OK) { // this format of texture supports auto generating mipmap
+        mipmap = SDL_TRUE;
+    }
 
     texture->driverdata = texturedata;
-
+    
     if (texture->access == SDL_TEXTUREACCESS_TARGET) {
         usage = D3DUSAGE_RENDERTARGET;
     } else {
         usage = 0;
     }
 
-    if (D3D_CreateTextureRep(data->device, &texturedata->texture, usage, texture->format, PixelFormatToD3DFMT(texture->format), texture->w, texture->h) < 0) {
+    if (mipmap) {
+        usage |= D3DUSAGE_AUTOGENMIPMAP;
+    }
+
+    if (D3D_CreateTextureRep(data->device, &texturedata->texture, usage, texture->format, PixelFormatToD3DFMT(texture->format), texture->w, texture->h, mipmap) < 0) {
         return -1;
     }
 #if SDL_HAVE_YUV
@@ -556,11 +581,11 @@ static int D3D_CreateTexture(SDL_Renderer *renderer, SDL_Texture *texture)
         texture->format == SDL_PIXELFORMAT_IYUV) {
         texturedata->yuv = SDL_TRUE;
 
-        if (D3D_CreateTextureRep(data->device, &texturedata->utexture, usage, texture->format, PixelFormatToD3DFMT(texture->format), (texture->w + 1) / 2, (texture->h + 1) / 2) < 0) {
+        if (D3D_CreateTextureRep(data->device, &texturedata->utexture, usage, texture->format, PixelFormatToD3DFMT(texture->format), (texture->w + 1) / 2, (texture->h + 1) / 2, mipmap) < 0) {
             return -1;
         }
 
-        if (D3D_CreateTextureRep(data->device, &texturedata->vtexture, usage, texture->format, PixelFormatToD3DFMT(texture->format), (texture->w + 1) / 2, (texture->h + 1) / 2) < 0) {
+        if (D3D_CreateTextureRep(data->device, &texturedata->vtexture, usage, texture->format, PixelFormatToD3DFMT(texture->format), (texture->w + 1) / 2, (texture->h + 1) / 2, mipmap) < 0) {
             return -1;
         }
     }
@@ -745,7 +770,38 @@ static void D3D_SetTextureScaleMode(SDL_Renderer *renderer, SDL_Texture *texture
     texturedata->scaleMode = (scaleMode == SDL_ScaleModeNearest) ? D3DTEXF_POINT : D3DTEXF_LINEAR;
 }
 
-static int D3D_SetRenderTargetInternal(SDL_Renderer *renderer, SDL_Texture *texture)
+static D3DTEXTUREADDRESS
+D3D_ConvertWrapMode(SDL_WrapMode wrapMode)
+{
+    switch (wrapMode) {
+    case SDL_WRAPMODE_CLAMP:
+        return D3DTADDRESS_CLAMP;
+    case SDL_WRAPMODE_REPEAT:
+        return D3DTADDRESS_WRAP;
+    }
+    return 0;
+}
+
+static SDL_bool
+D3D_SupportsWrapMode(SDL_Renderer * renderer, SDL_WrapMode wrapMode)
+{
+    return D3D_ConvertWrapMode(wrapMode) != 0;
+}
+
+static void
+D3D_SetTextureWrapMode(SDL_Renderer * renderer, SDL_Texture * texture, SDL_WrapMode wrapMode)
+{
+    D3D_TextureData *texturedata = (D3D_TextureData *) texture->driverdata;
+
+    if (!texturedata) {
+        return;
+    }
+
+    texturedata->wrapMode = (wrapMode == SDL_WRAPMODE_CLAMP) ? D3DTADDRESS_CLAMP : D3DTADDRESS_WRAP;
+}
+
+static int
+D3D_SetRenderTargetInternal(SDL_Renderer * renderer, SDL_Texture * texture)
 {
     D3D_RenderData *data = (D3D_RenderData *)renderer->driverdata;
     D3D_TextureData *texturedata;
@@ -773,8 +829,9 @@ static int D3D_SetRenderTargetInternal(SDL_Renderer *renderer, SDL_Texture *text
     texturerep = &texturedata->texture;
     if (texturerep->dirty && texturerep->staging) {
         if (!texturerep->texture) {
-            result = IDirect3DDevice9_CreateTexture(device, texturerep->w, texturerep->h, 1, texturerep->usage,
-                                                    PixelFormatToD3DFMT(texturerep->format), D3DPOOL_DEFAULT, &texturerep->texture, NULL);
+            int levels = texturerep->mipmap ? 0 : 1;
+            result = IDirect3DDevice9_CreateTexture(device, texturerep->w, texturerep->h, levels, texturerep->usage,
+                PixelFormatToD3DFMT(texturerep->format), D3DPOOL_DEFAULT, &texturerep->texture, NULL);
             if (FAILED(result)) {
                 return D3D_SetError("CreateTexture(D3DPOOL_DEFAULT)", result);
             }
@@ -893,8 +950,9 @@ static int UpdateDirtyTexture(IDirect3DDevice9 *device, D3D_TextureRep *texture)
     if (texture->dirty && texture->staging) {
         HRESULT result;
         if (!texture->texture) {
-            result = IDirect3DDevice9_CreateTexture(device, texture->w, texture->h, 1, texture->usage,
-                                                    PixelFormatToD3DFMT(texture->format), D3DPOOL_DEFAULT, &texture->texture, NULL);
+            int levels = texture->mipmap ? 0 : 1;
+            result = IDirect3DDevice9_CreateTexture(device, texture->w, texture->h, levels, texture->usage,
+                PixelFormatToD3DFMT(texture->format), D3DPOOL_DEFAULT, &texture->texture, NULL);
             if (FAILED(result)) {
                 return D3D_SetError("CreateTexture(D3DPOOL_DEFAULT)", result);
             }
@@ -922,20 +980,53 @@ static int BindTextureRep(IDirect3DDevice9 *device, D3D_TextureRep *texture, DWO
 
 static void UpdateTextureScaleMode(D3D_RenderData *data, D3D_TextureData *texturedata, unsigned index)
 {
-    if (texturedata->scaleMode != data->scaleMode[index]) {
+    if (texturedata->scaleMode != data->scaleMode[index] ) {
         IDirect3DDevice9_SetSamplerState(data->device, index, D3DSAMP_MINFILTER,
                                          texturedata->scaleMode);
         IDirect3DDevice9_SetSamplerState(data->device, index, D3DSAMP_MAGFILTER,
                                          texturedata->scaleMode);
-        IDirect3DDevice9_SetSamplerState(data->device, index, D3DSAMP_ADDRESSU,
-                                         D3DTADDRESS_CLAMP);
-        IDirect3DDevice9_SetSamplerState(data->device, index, D3DSAMP_ADDRESSV,
-                                         D3DTADDRESS_CLAMP);
+
         data->scaleMode[index] = texturedata->scaleMode;
     }
 }
 
-static int SetupTextureState(D3D_RenderData *data, SDL_Texture *texture, LPDIRECT3DPIXELSHADER9 *shader)
+static void
+UpdateTextureWrapMode(D3D_RenderData *data, D3D_TextureData *texturedata, unsigned index)
+{
+    if ( texturedata->wrapMode != data->wrapMode[index] ) {
+        IDirect3DDevice9_SetSamplerState(data->device, index, D3DSAMP_ADDRESSU,
+                                         texturedata->wrapMode);
+        IDirect3DDevice9_SetSamplerState(data->device, index, D3DSAMP_ADDRESSV,
+                                         texturedata->wrapMode);
+
+        data->wrapMode[index] = texturedata->wrapMode;
+    }
+}
+
+static void
+UpdateTextureMipmapMode(D3D_RenderData *data, D3D_TextureData *texturedata, unsigned index)
+{
+    if (texturedata->texture.mipmap != data->mipmapMode[index]) {
+
+        if (texturedata->texture.mipmap) {
+            if (texturedata->scaleMode == D3DTEXF_POINT) { // just use scaleMode nearest/linear to determine mipmap nearest/linear as well (same as we do in Metal and OpenGL renderers)
+                IDirect3DDevice9_SetSamplerState(data->device, index, D3DSAMP_MIPFILTER,
+                                                 D3DTEXF_POINT);
+            } else {
+                IDirect3DDevice9_SetSamplerState(data->device, index, D3DSAMP_MIPFILTER,
+                                                 D3DTEXF_LINEAR);
+            }
+        } else {
+            IDirect3DDevice9_SetSamplerState(data->device, index, D3DSAMP_MIPFILTER,
+                                             D3DTEXF_NONE);
+        }
+
+        data->mipmapMode[index] = texturedata->texture.mipmap;
+    }
+}
+
+static int
+SetupTextureState(D3D_RenderData *data, SDL_Texture * texture, LPDIRECT3DPIXELSHADER9 *shader)
 {
     D3D_TextureData *texturedata = (D3D_TextureData *)texture->driverdata;
 
@@ -946,6 +1037,8 @@ static int SetupTextureState(D3D_RenderData *data, SDL_Texture *texture, LPDIREC
     }
 
     UpdateTextureScaleMode(data, texturedata, 0);
+    UpdateTextureWrapMode(data, texturedata, 0);
+    UpdateTextureMipmapMode(data, texturedata, 0);
 
     if (BindTextureRep(data->device, &texturedata->texture, 0) < 0) {
         return -1;
@@ -968,6 +1061,12 @@ static int SetupTextureState(D3D_RenderData *data, SDL_Texture *texture, LPDIREC
 
         UpdateTextureScaleMode(data, texturedata, 1);
         UpdateTextureScaleMode(data, texturedata, 2);
+
+        UpdateTextureWrapMode(data, texturedata, 1);
+        UpdateTextureWrapMode(data, texturedata, 2);
+
+        UpdateTextureMipmapMode(data, texturedata, 1);
+        UpdateTextureMipmapMode(data, texturedata, 2);
 
         if (BindTextureRep(data->device, &texturedata->utexture, 1) < 0) {
             return -1;
@@ -1574,6 +1673,7 @@ SDL_Renderer *D3D_CreateRenderer(SDL_Window *window, Uint32 flags)
         SDL_OutOfMemory();
         return NULL;
     }
+    data->mipmapCapAvailable = SDL_FALSE;
 
     if (!D3D_LoadDLL(&data->d3dDLL, &data->d3d)) {
         SDL_free(renderer);
@@ -1593,6 +1693,8 @@ SDL_Renderer *D3D_CreateRenderer(SDL_Window *window, Uint32 flags)
     renderer->LockTexture = D3D_LockTexture;
     renderer->UnlockTexture = D3D_UnlockTexture;
     renderer->SetTextureScaleMode = D3D_SetTextureScaleMode;
+    renderer->SetTextureWrapMode = D3D_SetTextureWrapMode;
+    renderer->SupportsWrapMode = D3D_SupportsWrapMode;
     renderer->SetRenderTarget = D3D_SetRenderTarget;
     renderer->QueueSetViewport = D3D_QueueSetViewport;
     renderer->QueueSetDrawColor = D3D_QueueSetViewport; /* SetViewport and SetDrawColor are (currently) no-ops. */
@@ -1643,6 +1745,10 @@ SDL_Renderer *D3D_CreateRenderer(SDL_Window *window, Uint32 flags)
     data->adapter = SDL_Direct3D9GetAdapterIndex(displayIndex);
 
     IDirect3D9_GetDeviceCaps(data->d3d, data->adapter, D3DDEVTYPE_HAL, &caps);
+
+    if (caps.Caps2 & D3DCAPS2_CANAUTOGENMIPMAP) {
+        data->mipmapCapAvailable = SDL_TRUE;
+    }
 
     device_flags = D3DCREATE_FPU_PRESERVE;
     if (caps.DevCaps & D3DDEVCAPS_HWTRANSFORMANDLIGHT) {

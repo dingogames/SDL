@@ -136,6 +136,15 @@ typedef enum
 } SDL_RendererFlip;
 
 /**
+ * The wrapping mode for a texture.
+ */
+typedef enum
+{
+    SDL_WRAPMODE_CLAMP, /**< Clamp */
+    SDL_WRAPMODE_REPEAT /**< Repeat */
+} SDL_WrapMode;
+
+/**
  * A structure representing rendering state
  */
 struct SDL_Renderer;
@@ -564,6 +573,35 @@ extern DECLSPEC int SDLCALL SDL_SetTextureUserData(SDL_Texture * texture,
  * \sa SDL_SetTextureUserData
  */
 extern DECLSPEC void * SDLCALL SDL_GetTextureUserData(SDL_Texture * texture);
+
+/**
+ * Set the wrap mode used for texture wrapping operations.
+ *
+ * \param texture the texture to update.
+ * \param wrapMode the SDL_WrapMode to use for texture wrapping.
+ * \returns 0 on success, or -1 if the texture is not valid or the wrap mode is
+ *          unsupported.
+ *
+ * \since This function is available since SDL 2.0.22.
+ *
+ * \sa SDL_GetTextureWrapMode
+ */
+extern DECLSPEC int SDLCALL SDL_SetTextureWrapMode(SDL_Texture * texture,
+                                                   SDL_WrapMode wrapMode);
+
+/**
+ * Get the wrap mode used for texture wrapping operations.
+ *
+ * \param texture the texture to query.
+ * \param wrapMode a pointer filled in with the current wrap mode.
+ * \return 0 on success, or -1 if the texture is not valid.
+ *
+ * \since This function is available since SDL 2.0.22.
+ *
+ * \sa SDL_SetTextureWrapMode
+ */
+extern DECLSPEC int SDLCALL SDL_GetTextureWrapMode(SDL_Texture * texture,
+                                                   SDL_WrapMode * wrapMode);
 
 /**
  * Update the given texture rectangle with new pixel data.

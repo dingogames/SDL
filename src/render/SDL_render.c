@@ -1297,6 +1297,7 @@ SDL_Texture *SDL_CreateTexture(SDL_Renderer *renderer, Uint32 format, int access
     texture->color.b = 255;
     texture->color.a = 255;
     texture->scaleMode = SDL_GetScaleMode();
+    texture->wrapMode = SDL_WRAPMODE_CLAMP;
     texture->renderer = renderer;
     texture->next = renderer->textures;
     if (renderer->textures) {
@@ -1665,6 +1666,48 @@ void *SDL_GetTextureUserData(SDL_Texture *texture)
     CHECK_TEXTURE_MAGIC(texture, NULL);
 
     return texture->userdata;
+}
+
+static SDL_bool
+IsSupportedWrapMode(SDL_Renderer * renderer, SDL_WrapMode wrapMode)
+{
+    if (wrapMode == SDL_WRAPMODE_CLAMP) {
+        // Clamping is the default behavior.
+        return SDL_TRUE;
+    }
+    return renderer->SupportsWrapMode && renderer->SupportsWrapMode(renderer, wrapMode);
+}
+
+int
+SDL_SetTextureWrapMode(SDL_Texture * texture, SDL_WrapMode wrapMode)
+{
+    SDL_Renderer *renderer;
+
+    CHECK_TEXTURE_MAGIC(texture, -1);
+
+    renderer = texture->renderer;
+    if (!IsSupportedWrapMode(renderer, wrapMode)) {
+        return SDL_Unsupported();
+    }
+    texture->wrapMode = wrapMode;
+    if (renderer->SetTextureWrapMode) {
+        renderer->SetTextureWrapMode(renderer, texture, wrapMode);
+    }
+    if (texture->native) {
+        return SDL_SetTextureWrapMode(texture->native, wrapMode);
+    }
+    return 0;
+}
+
+int
+SDL_GetTextureWrapMode(SDL_Texture * texture, SDL_WrapMode *wrapMode)
+{
+    CHECK_TEXTURE_MAGIC(texture, -1);
+
+    if (wrapMode) {
+        *wrapMode = texture->wrapMode;
+    }
+    return 0;
 }
 
 #if SDL_HAVE_YUV
@@ -4136,6 +4179,8 @@ int SDL_RenderGeometryRaw(SDL_Renderer *renderer,
         texture = texture->native;
     }
 
+    // Why do we care if values are out of bounds? (need to allow these values to allow repeating texture)
+    /*
     if (texture) {
         for (i = 0; i < num_vertices; ++i) {
             const float *uv_ = (const float *)((const char *)uv + i * uv_stride);
@@ -4145,7 +4190,7 @@ int SDL_RenderGeometryRaw(SDL_Renderer *renderer,
                 return SDL_SetError("Values of 'uv' out of bounds %f %f at %d/%d", u, v, i, num_vertices);
             }
         }
-    }
+    }*/
 
     if (indices) {
         for (i = 0; i < num_indices; ++i) {

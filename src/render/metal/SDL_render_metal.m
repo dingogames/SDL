@@ -126,8 +126,14 @@ typedef struct METAL_ShaderPipelines
     @property (nonatomic, retain) id<MTLRenderCommandEncoder> mtlcmdencoder;
     @property (nonatomic, retain) id<MTLLibrary> mtllibrary;
     @property (nonatomic, retain) id<CAMetalDrawable> mtlbackbuffer;
-    @property (nonatomic, retain) id<MTLSamplerState> mtlsamplernearest;
-    @property (nonatomic, retain) id<MTLSamplerState> mtlsamplerlinear;
+    @property (nonatomic, retain) id<MTLSamplerState> mtlsamplernearestclamp;
+    @property (nonatomic, retain) id<MTLSamplerState> mtlsamplernearestrepeat;
+    @property (nonatomic, retain) id<MTLSamplerState> mtlsamplerlinearclamp;
+    @property (nonatomic, retain) id<MTLSamplerState> mtlsamplerlinearrepeat;
+    @property (nonatomic, retain) id<MTLSamplerState> mtlsamplernearestmipmapclamp;
+    @property (nonatomic, retain) id<MTLSamplerState> mtlsamplernearestmipmaprepeat;
+    @property (nonatomic, retain) id<MTLSamplerState> mtlsamplerlinearmipmapclamp;
+    @property (nonatomic, retain) id<MTLSamplerState> mtlsamplerlinearmipmaprepeat;
     @property (nonatomic, retain) id<MTLBuffer> mtlbufconstants;
     @property (nonatomic, retain) id<MTLBuffer> mtlbufquadindices;
     @property (nonatomic, assign) SDL_MetalView mtlview;
@@ -154,6 +160,7 @@ typedef struct METAL_ShaderPipelines
     @property (nonatomic, assign) BOOL hasdata;
     @property (nonatomic, retain) id<MTLBuffer> lockedbuffer;
     @property (nonatomic, assign) SDL_Rect lockedrect;
+    @property (nonatomic, assign) BOOL mipmap;
 @end
 
 @implementation METAL_TextureData
@@ -519,7 +526,46 @@ static SDL_bool METAL_SupportsBlendMode(SDL_Renderer * renderer, SDL_BlendMode b
     return SDL_TRUE;
 }
 
-static int METAL_CreateTexture(SDL_Renderer * renderer, SDL_Texture * texture)
+static void
+METAL_SetTextureSampler(SDL_Texture * texture, METAL_RenderData *data, METAL_TextureData *texturedata)
+{
+    if (texturedata.mipmap) {
+        if (texture->scaleMode == SDL_ScaleModeNearest) {
+            if ( texture->wrapMode == SDL_WRAPMODE_CLAMP ) {
+                texturedata.mtlsampler = data.mtlsamplernearestmipmapclamp;
+            }
+            else {
+                texturedata.mtlsampler = data.mtlsamplernearestmipmaprepeat;
+            }
+        } else {
+            if ( texture->wrapMode == SDL_WRAPMODE_CLAMP ) {
+                texturedata.mtlsampler = data.mtlsamplerlinearmipmapclamp;
+            }
+            else {
+                texturedata.mtlsampler = data.mtlsamplerlinearmipmaprepeat;
+            }
+        }
+    } else {
+        if (texture->scaleMode == SDL_ScaleModeNearest) {
+            if ( texture->wrapMode == SDL_WRAPMODE_CLAMP ) {
+                texturedata.mtlsampler = data.mtlsamplernearestclamp;
+            }
+            else {
+                texturedata.mtlsampler = data.mtlsamplernearestrepeat;
+            }
+        } else {
+            if ( texture->wrapMode == SDL_WRAPMODE_CLAMP ) {
+                texturedata.mtlsampler = data.mtlsamplerlinearclamp;
+            }
+            else {
+                texturedata.mtlsampler = data.mtlsamplerlinearrepeat;
+            }
+        }
+    }
+}
+
+static int
+METAL_CreateTexture(SDL_Renderer * renderer, SDL_Texture * texture)
 { @autoreleasepool {
     METAL_RenderData *data = (__bridge METAL_RenderData *) renderer->driverdata;
     MTLPixelFormat pixfmt;
@@ -527,7 +573,6 @@ static int METAL_CreateTexture(SDL_Renderer * renderer, SDL_Texture * texture)
     id<MTLTexture> mtltexture, mtltexture_uv;
     BOOL yuv, nv12;
     METAL_TextureData *texturedata;
-
     switch (texture->format) {
         case SDL_PIXELFORMAT_ABGR8888:
             pixfmt = MTLPixelFormatRGBA8Unorm;
@@ -545,8 +590,10 @@ static int METAL_CreateTexture(SDL_Renderer * renderer, SDL_Texture * texture)
             return SDL_SetError("Texture format %s not supported by Metal", SDL_GetPixelFormatName(texture->format));
     }
 
+    BOOL mipmapHintOn = SDL_GetHintBoolean(SDL_HINT_RENDER_FILTER_MIPMAP, SDL_FALSE) ;
+
     mtltexdesc = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:pixfmt
-                                            width:(NSUInteger)texture->w height:(NSUInteger)texture->h mipmapped:NO];
+                                            width:(NSUInteger)texture->w height:(NSUInteger)texture->h mipmapped:mipmapHintOn];
 
     /* Not available in iOS 8. */
     if ([mtltexdesc respondsToSelector:@selector(usage)]) {
@@ -587,11 +634,10 @@ static int METAL_CreateTexture(SDL_Renderer * renderer, SDL_Texture * texture)
     }
 #endif /* SDL_HAVE_YUV */
     texturedata = [[METAL_TextureData alloc] init];
-    if (texture->scaleMode == SDL_ScaleModeNearest) {
-        texturedata.mtlsampler = data.mtlsamplernearest;
-    } else {
-        texturedata.mtlsampler = data.mtlsamplerlinear;
-    }
+    texturedata.mipmap = mipmapHintOn;
+
+    METAL_SetTextureSampler( texture, data, texturedata );
+    
     texturedata.mtltexture = mtltexture;
     texturedata.mtltexture_uv = mtltexture_uv;
 #if SDL_HAVE_YUV
@@ -627,7 +673,8 @@ static int METAL_CreateTexture(SDL_Renderer * renderer, SDL_Texture * texture)
     return 0;
 }}
 
-static void METAL_UploadTextureData(id<MTLTexture> texture, SDL_Rect rect, int slice,
+static void
+METAL_UploadTextureData(SDL_Renderer * renderer, id<MTLTexture> texture, SDL_Rect rect, int slice,
                         const void * pixels, int pitch)
 {
     [texture replaceRegion:MTLRegionMake2D(rect.x, rect.y, rect.w, rect.h)
@@ -636,6 +683,17 @@ static void METAL_UploadTextureData(id<MTLTexture> texture, SDL_Rect rect, int s
                  withBytes:pixels
                bytesPerRow:pitch
              bytesPerImage:0];
+
+    // Create mipmap data if needed
+    if ( [texture mipmapLevelCount] > 1 ) {
+        METAL_RenderData *data = (__bridge METAL_RenderData *) renderer->driverdata;
+        id<MTLCommandBuffer> commandBuffer = [data.mtlcmdqueue commandBuffer];
+        id<MTLBlitCommandEncoder> commandEncoder = [commandBuffer blitCommandEncoder];
+        [commandEncoder generateMipmapsForTexture:texture];
+        [commandEncoder endEncoding];
+        [commandBuffer commit];
+        [commandBuffer waitUntilCompleted];
+    }
 }
 
 static MTLStorageMode METAL_GetStorageMode(id<MTLResource> resource)
@@ -661,14 +719,14 @@ static int METAL_UpdateTextureInternal(SDL_Renderer * renderer, METAL_TextureDat
      * use replaceRegion to upload to it directly. Otherwise we upload the data
      * to a staging texture and copy that over. */
     if (!texturedata.hasdata && METAL_GetStorageMode(texture) != MTLStorageModePrivate) {
-        METAL_UploadTextureData(texture, rect, slice, pixels, pitch);
+        METAL_UploadTextureData(renderer, texture, rect, slice, pixels, pitch);
         return 0;
     }
 
     desc = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:texture.pixelFormat
                                                               width:rect.w
                                                              height:rect.h
-                                                          mipmapped:NO];
+                                                          mipmapped:texturedata.mipmap];
 
     if (desc == nil) {
         return SDL_OutOfMemory();
@@ -682,7 +740,7 @@ static int METAL_UpdateTextureInternal(SDL_Renderer * renderer, METAL_TextureDat
         return SDL_OutOfMemory();
     }
 
-    METAL_UploadTextureData(stagingtex, stagingrect, 0, pixels, pitch);
+    METAL_UploadTextureData(renderer, stagingtex, stagingrect, 0, pixels, pitch);
 
     if (data.mtlcmdencoder != nil) {
         [data.mtlcmdencoder endEncoding];
@@ -940,14 +998,30 @@ static void METAL_SetTextureScaleMode(SDL_Renderer * renderer, SDL_Texture * tex
     METAL_RenderData *data = (__bridge METAL_RenderData *) renderer->driverdata;
     METAL_TextureData *texturedata = (__bridge METAL_TextureData *)texture->driverdata;
 
-    if (scaleMode == SDL_ScaleModeNearest) {
-        texturedata.mtlsampler = data.mtlsamplernearest;
-    } else {
-        texturedata.mtlsampler = data.mtlsamplerlinear;
-    }
+    METAL_SetTextureSampler( texture, data, texturedata );
 }}
 
-static int METAL_SetRenderTarget(SDL_Renderer * renderer, SDL_Texture * texture)
+static void
+METAL_SetTextureWrapMode(SDL_Renderer * renderer, SDL_Texture * texture, SDL_WrapMode wrapMode)
+{ @autoreleasepool {
+    METAL_RenderData *data = (__bridge METAL_RenderData *) renderer->driverdata;
+    METAL_TextureData *texturedata = (__bridge METAL_TextureData *)texture->driverdata;
+
+    METAL_SetTextureSampler( texture, data, texturedata );
+}}
+
+static SDL_bool
+METAL_SupportsWrapMode(SDL_Renderer * renderer, SDL_WrapMode wrapMode)
+{
+    if ( wrapMode == SDL_WRAPMODE_CLAMP || wrapMode == SDL_WRAPMODE_REPEAT) {
+        return SDL_TRUE;
+    }
+    return SDL_FALSE;
+}
+
+
+static int
+METAL_SetRenderTarget(SDL_Renderer * renderer, SDL_Texture * texture)
 { @autoreleasepool {
     METAL_RenderData *data = (__bridge METAL_RenderData *) renderer->driverdata;
 
@@ -1597,7 +1671,7 @@ static SDL_Renderer *METAL_CreateRenderer(SDL_Window * window, Uint32 flags)
     MTLSamplerDescriptor *samplerdesc;
     id<MTLCommandQueue> mtlcmdqueue;
     id<MTLLibrary> mtllibrary;
-    id<MTLSamplerState> mtlsamplernearest, mtlsamplerlinear;
+    id<MTLSamplerState> mtlsamplernearestclamp, mtlsamplernearestrepeat, mtlsamplerlinearclamp, mtlsamplerlinearrepeat, mtlsamplernearestmipmapclamp, mtlsamplernearestmipmaprepeat, mtlsamplerlinearmipmapclamp, mtlsamplerlinearmipmaprepeat ;
     id<MTLBuffer> mtlbufconstantstaging, mtlbufquadindicesstaging, mtlbufconstants, mtlbufquadindices;
     id<MTLCommandBuffer> cmdbuffer;
     id<MTLBlitCommandEncoder> blitcmd;
@@ -1738,15 +1812,81 @@ static SDL_Renderer *METAL_CreateRenderer(SDL_Window * window, Uint32 flags)
 
     samplerdesc = [[MTLSamplerDescriptor alloc] init];
 
+    samplerdesc.rAddressMode = MTLSamplerAddressModeClampToEdge;
+    samplerdesc.sAddressMode = MTLSamplerAddressModeClampToEdge;
+    samplerdesc.tAddressMode = MTLSamplerAddressModeClampToEdge;
     samplerdesc.minFilter = MTLSamplerMinMagFilterNearest;
     samplerdesc.magFilter = MTLSamplerMinMagFilterNearest;
-    mtlsamplernearest = [data.mtldevice newSamplerStateWithDescriptor:samplerdesc];
-    data.mtlsamplernearest = mtlsamplernearest;
+    samplerdesc.mipFilter = MTLSamplerMipFilterNotMipmapped;
+    mtlsamplernearestclamp = [data.mtldevice newSamplerStateWithDescriptor:samplerdesc];
+    data.mtlsamplernearestclamp = mtlsamplernearestclamp;
+    
+    samplerdesc.rAddressMode = MTLSamplerAddressModeRepeat;
+    samplerdesc.sAddressMode = MTLSamplerAddressModeRepeat;
+    samplerdesc.tAddressMode = MTLSamplerAddressModeRepeat;
+    samplerdesc.minFilter = MTLSamplerMinMagFilterNearest;
+    samplerdesc.magFilter = MTLSamplerMinMagFilterNearest;
+    samplerdesc.mipFilter = MTLSamplerMipFilterNotMipmapped;
+    mtlsamplernearestrepeat = [data.mtldevice newSamplerStateWithDescriptor:samplerdesc];
+    data.mtlsamplernearestrepeat = mtlsamplernearestrepeat;
 
+
+    samplerdesc.rAddressMode = MTLSamplerAddressModeClampToEdge;
+    samplerdesc.sAddressMode = MTLSamplerAddressModeClampToEdge;
+    samplerdesc.tAddressMode = MTLSamplerAddressModeClampToEdge;
     samplerdesc.minFilter = MTLSamplerMinMagFilterLinear;
     samplerdesc.magFilter = MTLSamplerMinMagFilterLinear;
-    mtlsamplerlinear = [data.mtldevice newSamplerStateWithDescriptor:samplerdesc];
-    data.mtlsamplerlinear = mtlsamplerlinear;
+    samplerdesc.mipFilter = MTLSamplerMipFilterNotMipmapped;
+    mtlsamplerlinearclamp = [data.mtldevice newSamplerStateWithDescriptor:samplerdesc];
+    data.mtlsamplerlinearclamp = mtlsamplerlinearclamp;
+    
+    samplerdesc.rAddressMode = MTLSamplerAddressModeRepeat;
+    samplerdesc.sAddressMode = MTLSamplerAddressModeRepeat;
+    samplerdesc.tAddressMode = MTLSamplerAddressModeRepeat;
+    samplerdesc.minFilter = MTLSamplerMinMagFilterLinear;
+    samplerdesc.magFilter = MTLSamplerMinMagFilterLinear;
+    samplerdesc.mipFilter = MTLSamplerMipFilterNotMipmapped;
+    mtlsamplerlinearrepeat = [data.mtldevice newSamplerStateWithDescriptor:samplerdesc];
+    data.mtlsamplerlinearrepeat = mtlsamplerlinearrepeat;
+    
+
+    samplerdesc.rAddressMode = MTLSamplerAddressModeClampToEdge;
+    samplerdesc.sAddressMode = MTLSamplerAddressModeClampToEdge;
+    samplerdesc.tAddressMode = MTLSamplerAddressModeClampToEdge;
+    samplerdesc.minFilter = MTLSamplerMinMagFilterNearest;
+    samplerdesc.magFilter = MTLSamplerMinMagFilterNearest;
+    samplerdesc.mipFilter = MTLSamplerMipFilterNearest;
+    mtlsamplernearestmipmapclamp = [data.mtldevice newSamplerStateWithDescriptor:samplerdesc];
+    data.mtlsamplernearestmipmapclamp = mtlsamplernearestmipmapclamp;
+
+    samplerdesc.rAddressMode = MTLSamplerAddressModeRepeat;
+    samplerdesc.sAddressMode = MTLSamplerAddressModeRepeat;
+    samplerdesc.tAddressMode = MTLSamplerAddressModeRepeat;
+    samplerdesc.minFilter = MTLSamplerMinMagFilterNearest;
+    samplerdesc.magFilter = MTLSamplerMinMagFilterNearest;
+    samplerdesc.mipFilter = MTLSamplerMipFilterNearest;
+    mtlsamplernearestmipmaprepeat = [data.mtldevice newSamplerStateWithDescriptor:samplerdesc];
+    data.mtlsamplernearestmipmaprepeat = mtlsamplernearestmipmaprepeat;
+
+
+    samplerdesc.rAddressMode = MTLSamplerAddressModeClampToEdge;
+    samplerdesc.sAddressMode = MTLSamplerAddressModeClampToEdge;
+    samplerdesc.tAddressMode = MTLSamplerAddressModeClampToEdge;
+    samplerdesc.minFilter = MTLSamplerMinMagFilterLinear;
+    samplerdesc.magFilter = MTLSamplerMinMagFilterLinear;
+    samplerdesc.mipFilter = MTLSamplerMipFilterLinear;
+    mtlsamplerlinearmipmapclamp = [data.mtldevice newSamplerStateWithDescriptor:samplerdesc];
+    data.mtlsamplerlinearmipmapclamp = mtlsamplerlinearmipmapclamp;
+    
+    samplerdesc.rAddressMode = MTLSamplerAddressModeRepeat;
+    samplerdesc.sAddressMode = MTLSamplerAddressModeRepeat;
+    samplerdesc.tAddressMode = MTLSamplerAddressModeRepeat;
+    samplerdesc.minFilter = MTLSamplerMinMagFilterLinear;
+    samplerdesc.magFilter = MTLSamplerMinMagFilterLinear;
+    samplerdesc.mipFilter = MTLSamplerMipFilterLinear;
+    mtlsamplerlinearmipmaprepeat = [data.mtldevice newSamplerStateWithDescriptor:samplerdesc];
+    data.mtlsamplerlinearmipmaprepeat = mtlsamplerlinearmipmaprepeat;
+
 
     mtlbufconstantstaging = [data.mtldevice newBufferWithLength:CONSTANTS_LENGTH options:MTLResourceStorageModeShared];
 
@@ -1806,6 +1946,8 @@ static SDL_Renderer *METAL_CreateRenderer(SDL_Window * window, Uint32 flags)
     renderer->LockTexture = METAL_LockTexture;
     renderer->UnlockTexture = METAL_UnlockTexture;
     renderer->SetTextureScaleMode = METAL_SetTextureScaleMode;
+    renderer->SetTextureWrapMode = METAL_SetTextureWrapMode;
+    renderer->SupportsWrapMode = METAL_SupportsWrapMode;
     renderer->SetRenderTarget = METAL_SetRenderTarget;
     renderer->QueueSetViewport = METAL_QueueSetViewport;
     renderer->QueueSetDrawColor = METAL_QueueSetDrawColor;

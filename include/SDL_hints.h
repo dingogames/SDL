@@ -82,6 +82,17 @@ extern "C" {
 #define SDL_HINT_ALLOW_TOPMOST "SDL_ALLOW_TOPMOST"
 
 /**
+ * \brief Sets the mipmap mode of the next loaded image
+ *  *
+ *  This variable can be set to the following values:
+ *    "0"       - Disable mipmap generation and mipmap filtering
+ *    "1"       - Enable automatic mipmap generation and mipmap texture filtering
+ *
+ *  By default mipmap filtering is not enabled
+ */
+#define SDL_HINT_RENDER_FILTER_MIPMAP "SDL_RENDER_FILTER_MIPMAP"
+
+/**
  * \brief Android APK expansion main file version. Should be a string number like "1", "2" etc.
  *
  * Must be set together with SDL_HINT_ANDROID_APK_EXPANSION_PATCH_FILE_VERSION.

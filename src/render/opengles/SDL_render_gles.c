@@ -112,6 +112,7 @@ typedef struct
     GLenum formattype;
     void *pixels;
     int pitch;
+    SDL_bool mipmap;
     GLES_FBOList *fbo;
 } GLES_TextureData;
 
@@ -316,7 +317,8 @@ static int GLES_CreateTexture(SDL_Renderer *renderer, SDL_Texture *texture)
     GLint internalFormat;
     GLenum format, type;
     int texture_w, texture_h;
-    GLenum scaleMode;
+    GLenum magnificationScaleMode;
+    GLenum minificationScaleMode;
     GLenum result;
 
     GLES_ActivateRenderer(renderer);
@@ -374,12 +376,27 @@ static int GLES_CreateTexture(SDL_Renderer *renderer, SDL_Texture *texture)
     data->texw = (GLfloat)texture->w / texture_w;
     data->texh = (GLfloat)texture->h / texture_h;
 
+    data->mipmap = SDL_GetHintBoolean(SDL_HINT_RENDER_FILTER_MIPMAP, SDL_FALSE) && (data->type == GL_TEXTURE_2D);
+
     data->format = format;
     data->formattype = type;
-    scaleMode = (texture->scaleMode == SDL_ScaleModeNearest) ? GL_NEAREST : GL_LINEAR;
+
+    if (texture->scaleMode == SDL_ScaleModeNearest) {
+        magnificationScaleMode = GL_NEAREST;
+        minificationScaleMode = data->mipmap ? GL_NEAREST_MIPMAP_NEAREST : GL_NEAREST;
+    }
+    else {
+        magnificationScaleMode = GL_LINEAR;
+        minificationScaleMode = data->mipmap ? GL_LINEAR_MIPMAP_LINEAR : GL_LINEAR;
+    }
+
     renderdata->glBindTexture(data->type, data->texture);
-    renderdata->glTexParameteri(data->type, GL_TEXTURE_MIN_FILTER, scaleMode);
-    renderdata->glTexParameteri(data->type, GL_TEXTURE_MAG_FILTER, scaleMode);
+
+    /* Generate mipmaps for minification if scaling using mipmaps is enabled  */
+    renderdata->glTexParameteri(data->type, GL_GENERATE_MIPMAP, data->mipmap ? GL_TRUE : GL_FALSE);
+    renderdata->glTexParameteri(data->type, GL_TEXTURE_MIN_FILTER, minificationScaleMode);
+    renderdata->glTexParameteri(data->type, GL_TEXTURE_MAG_FILTER, magnificationScaleMode);
+
     renderdata->glTexParameteri(data->type, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     renderdata->glTexParameteri(data->type, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
 
@@ -491,11 +508,57 @@ static void GLES_SetTextureScaleMode(SDL_Renderer *renderer, SDL_Texture *textur
 {
     GLES_RenderData *renderdata = (GLES_RenderData *)renderer->driverdata;
     GLES_TextureData *data = (GLES_TextureData *)texture->driverdata;
-    GLenum glScaleMode = (scaleMode == SDL_ScaleModeNearest) ? GL_NEAREST : GL_LINEAR;
+    GLenum magnificationScaleMode;
+    GLenum minificationScaleMode;
+
+    if (scaleMode == SDL_ScaleModeNearest) {
+        magnificationScaleMode = GL_NEAREST;
+        minificationScaleMode = data->mipmap ? GL_NEAREST_MIPMAP_NEAREST : GL_NEAREST;
+    }
+    else {
+        magnificationScaleMode = GL_LINEAR;
+        minificationScaleMode = data->mipmap ? GL_LINEAR_MIPMAP_LINEAR : GL_LINEAR;
+    }
 
     renderdata->glBindTexture(data->type, data->texture);
-    renderdata->glTexParameteri(data->type, GL_TEXTURE_MIN_FILTER, glScaleMode);
-    renderdata->glTexParameteri(data->type, GL_TEXTURE_MAG_FILTER, glScaleMode);
+    renderdata->glTexParameteri(data->type, GL_GENERATE_MIPMAP, data->mipmap ? GL_TRUE : GL_FALSE);
+    renderdata->glTexParameteri(data->type, GL_TEXTURE_MIN_FILTER, minificationScaleMode);
+    renderdata->glTexParameteri(data->type, GL_TEXTURE_MAG_FILTER, magnificationScaleMode);
+
+    texture->scaleMode = scaleMode;
+}
+
+static GLint
+GLES_ConvertWrapMode(SDL_WrapMode wrapMode)
+{
+    switch (wrapMode) {
+        case SDL_WRAPMODE_CLAMP:
+            return GL_CLAMP_TO_EDGE;
+        case SDL_WRAPMODE_REPEAT:
+            return GL_REPEAT;
+    }
+    return GL_INVALID_VALUE;
+}
+
+static SDL_bool
+GLES_SupportsWrapMode(SDL_Renderer * renderer, SDL_WrapMode wrapMode)
+{
+    return GLES_ConvertWrapMode(wrapMode) != GL_INVALID_VALUE;
+}
+
+static void
+GLES_SetTextureWrapMode(SDL_Renderer * renderer, SDL_Texture * texture, SDL_WrapMode wrapMode)
+{
+    GLES_RenderData *renderdata = (GLES_RenderData *) renderer->driverdata;
+    GLES_TextureData *data = (GLES_TextureData *)texture->driverdata;
+    const GLenum textype = data->type ;
+    GLint glWrapMode = GLES_ConvertWrapMode(wrapMode);
+
+    renderdata->glBindTexture(textype, data->texture);
+    renderdata->glTexParameteri(textype, GL_TEXTURE_WRAP_S, glWrapMode);
+    renderdata->glTexParameteri(textype, GL_TEXTURE_WRAP_T, glWrapMode);
+
+    texture->wrapMode = wrapMode;
 }
 
 static int GLES_SetRenderTarget(SDL_Renderer *renderer, SDL_Texture *texture)
@@ -1102,6 +1165,8 @@ static SDL_Renderer *GLES_CreateRenderer(SDL_Window *window, Uint32 flags)
     renderer->LockTexture = GLES_LockTexture;
     renderer->UnlockTexture = GLES_UnlockTexture;
     renderer->SetTextureScaleMode = GLES_SetTextureScaleMode;
+    renderer->SetTextureWrapMode = GLES_SetTextureWrapMode;
+    renderer->SupportsWrapMode = GLES_SupportsWrapMode;
     renderer->SetRenderTarget = GLES_SetRenderTarget;
     renderer->QueueSetViewport = GLES_QueueSetViewport;
     renderer->QueueSetDrawColor = GLES_QueueSetViewport; /* SetViewport and SetDrawColor are (currently) no-ops. */
